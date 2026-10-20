@@ -56,6 +56,10 @@ func (h *APIHandler) HandlePostAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("challenge verification failed: %s", err.Error()), http.StatusUnauthorized)
 		return
 	}
+	if !h.claimChallenge(body.Transaction) {
+		http.Error(w, "challenge has already been used", http.StatusUnauthorized)
+		return
+	}
 
 	token, err := auth.GenerateJWT(clientAddr, h.cfg.JWTSecret, h.cfg.JWTExpiryHours)
 	if err != nil {

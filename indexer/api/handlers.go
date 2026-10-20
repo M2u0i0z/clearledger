@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,8 @@ type APIHandler struct {
 	statsMu         sync.RWMutex
 	statsData       *db.ProtocolStats
 	statsCached     time.Time
+	challengeMu     sync.Mutex
+	usedChallenges  map[string]time.Time
 	listenerHealth  *ListenerHealth
 	dbHealthChecker func(context.Context) error
 
@@ -50,6 +54,7 @@ func NewAPIHandler(cfg *config.Config) (*APIHandler, error) {
 		cfg:             cfg,
 		serverKP:        kp,
 		listenerHealth:  NewListenerHealth(),
+		usedChallenges:  make(map[string]time.Time),
 		dbHealthChecker: defaultDBHealthChecker,
 		getInvoiceByIDFn: func(ctx context.Context, id string) (*db.DbInvoice, error) {
 			return db.GetInvoiceByID(ctx, db.Pool, id)
@@ -60,6 +65,27 @@ func NewAPIHandler(cfg *config.Config) (*APIHandler, error) {
 		getProtocolStatsFn: db.GetProtocolStats,
 		readContractFn:     soroban.ReadContract,
 	}, nil
+}
+
+// claimChallenge prevents a verified SEP-10 transaction from minting more
+// than one session on this API process. Expired fingerprints are discarded so
+// the replay cache remains bounded by the challenge lifetime.
+func (h *APIHandler) claimChallenge(transaction string) bool {
+	fingerprint := sha256.Sum256([]byte(transaction))
+	key := hex.EncodeToString(fingerprint[:])
+	now := time.Now()
+	h.challengeMu.Lock()
+	defer h.challengeMu.Unlock()
+	for used, expiresAt := range h.usedChallenges {
+		if !now.Before(expiresAt) {
+			delete(h.usedChallenges, used)
+		}
+	}
+	if _, exists := h.usedChallenges[key]; exists {
+		return false
+	}
+	h.usedChallenges[key] = now.Add(15 * time.Minute)
+	return true
 }
 
 func GetServerKeypair(seed string) (*keypair.Full, error) {
